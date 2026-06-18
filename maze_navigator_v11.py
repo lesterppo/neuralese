@@ -38,26 +38,32 @@ WALL_COLLISION_PENALTY = -10.0; WALL_ADJACENCY_PENALTY = -0.3
 GOAL_REWARD = 10.0; STEP_PENALTY = -0.05; TARGET_THRESH = 0.5
 WALL_FEATURE_DIM = 5
 CHANNEL_NOISE_STD = 0.1
-DIVERSITY_WEIGHT = 0.05  # SYNERGY: noise gives "why", diversity gives "how"
+DIVERSITY_WEIGHT = 0.05
+EXP_PROXIMITY_ALPHA = 0.5   # Narrow-band exponential proximity
+EXP_PROXIMITY_BETA = 2.0     # Decay rate: exp(-2*d) → 0.14 at d=1, 0.02 at d=2
+
+# 4 fixed start/goal pairs covering different maze regions
+FIXED_PAIRS = [
+    ((0, 0), (9, 9)),      # Top-left → bottom-right
+    ((0, 9), (9, 0)),      # Top-right → bottom-left
+    ((4, 0), (5, 9)),      # Mid-left → mid-right
+    ((0, 5), (9, 4)),      # Top-center → bottom-center
+]
 
 
 def gen_maze(wall_prob=WALL_PROB):
-    """RANDOMIZED start and target — agents must learn general communication."""
+    """FIXED start/goal pairs (not randomized). Prevents single-route memorization
+    while keeping the problem learnable."""
     for _ in range(100):
         grid = (np.random.rand(GRID_SIZE, GRID_SIZE) < wall_prob).astype(np.float32)
-        # Random free cells for start and target
-        free = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE) if grid[r, c] == 0]
-        if len(free) < 2: continue
-        idx = np.random.choice(len(free), 2, replace=False)
-        start = tuple(free[idx[0]]); target = tuple(free[idx[1]])
-        # Ensure start != target and path exists
-        if start == target: continue
-        if not bfs_reachable(grid, start, target): continue
-        # Ensure minimum distance of 5 cells (nontrivial navigation)
-        if abs(start[0]-target[0]) + abs(start[1]-target[1]) < 5: continue
+        # Pick one of 4 fixed pairs
+        start_rc, target_rc = FIXED_PAIRS[np.random.randint(0, len(FIXED_PAIRS))]
+        if grid[start_rc] == 1.0: grid[start_rc] = 0.0
+        if grid[target_rc] == 1.0: grid[target_rc] = 0.0
+        if not bfs_reachable(grid, start_rc, target_rc): continue
         return (torch.tensor(grid),
-                torch.tensor(start, dtype=torch.float32),
-                torch.tensor(target, dtype=torch.float32))
+                torch.tensor(start_rc, dtype=torch.float32),
+                torch.tensor(target_rc, dtype=torch.float32))
     grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
     return torch.tensor(grid), torch.tensor((0, 0), dtype=torch.float32), torch.tensor((9, 9), dtype=torch.float32)
 
@@ -200,7 +206,10 @@ def collect_trajectories(observer, navigator, num_eps):
             rn,cn = max(0,min(GRID_SIZE-1,rn)),max(0,min(GRID_SIZE-1,cn))
             wh=(grid[rn,cn]==1.0); rd=torch.norm(np_-target).item()<TARGET_THRESH
             reward = -torch.norm(np_-target).item()*0.1 + STEP_PENALTY
-            if wf[-1]>0: reward += WALL_ADJACENCY_PENALTY
+            # Narrow-band exponential proximity: decays fast, only fires near walls
+            # exp(-2.0*1) ≈ 0.14 at d=1, exp(-2.0*2) ≈ 0.02 at d=2 → essentially zero beyond d=2
+            min_wall_dist = min(wf[0].item(), wf[1].item(), wf[2].item(), wf[3].item()) * GRID_SIZE
+            reward -= EXP_PROXIMITY_ALPHA * np.exp(-EXP_PROXIMITY_BETA * min_wall_dist)
             it=False
             if wh: reward+=WALL_COLLISION_PENALTY; active=False; it=True
             if rd: reward+=GOAL_REWARD; active=False; it=True
@@ -361,11 +370,12 @@ def plot_summary(wh,ph,er,out_dir):
 if __name__=="__main__":
     out_dir=Path(__file__).parent/"output"; out_dir.mkdir(exist_ok=True)
     print("="*60)
-    print("NEURALESE v11 — Randomized Start/Goal + Channel Noise")
+    print("NEURALESE v13 — 4 Fixed Pairs + Narrow-Band Proximity")
     print("="*60)
-    print(f"  Start/goal: RANDOMIZED (min 5-cell separation)")
-    print(f"  Channel noise: std={CHANNEL_NOISE_STD} injected into z")
-    print(f"  NO diversity loss (noise forces emergence naturally)")
+    print(f"  Start/goal: 4 fixed pairs (not single route, not fully random)")
+    print(f"  Channel noise: std={CHANNEL_NOISE_STD}")
+    print(f"  Diversity: weight={DIVERSITY_WEIGHT} on clean z")
+    print(f"  Proximity: {EXP_PROXIMITY_ALPHA}*exp(-{EXP_PROXIMITY_BETA}*d)")
 
     print("\n[Phase 1] Warm-Start...")
     observer=Observer(); navigator=Navigator()

@@ -37,7 +37,8 @@ ENTROPY_COEF = 0.005; VALUE_COEF = 0.5
 WALL_COLLISION_PENALTY = -10.0; WALL_ADJACENCY_PENALTY = -0.3
 GOAL_REWARD = 10.0; STEP_PENALTY = -0.05; TARGET_THRESH = 0.5
 WALL_FEATURE_DIM = 5
-CHANNEL_NOISE_STD = 0.1  # Gaussian noise injected into z between Observer→Navigator
+CHANNEL_NOISE_STD = 0.1
+DIVERSITY_WEIGHT = 0.05  # SYNERGY: noise gives "why", diversity gives "how"
 
 
 def gen_maze(wall_prob=WALL_PROB):
@@ -233,8 +234,8 @@ def compute_gae(rl,vl,tl,observer,ag,ap,aw):
     return aadv,aret
 
 
-def ppo_update(observer, navigator, opt, traj, adv_list, ret_list):
-    """PPO update WITHOUT diversity loss. Channel noise handles emergence."""
+def ppo_update(observer, navigator, opt, traj, adv_list, ret_list, azs_rollout):
+    """PPO update WITH diversity loss. Noise handles robustness, diversity handles emergence."""
     (ag,ap,aw,ar,aa,alp,_,av,_,_) = traj
     gc=torch.cat([g for g in ag],dim=0); pc=torch.cat([p for p in ap],dim=0)
     wc=torch.cat([w for w in aw],dim=0); rc=torch.cat([r for r in ar],dim=0)
@@ -244,9 +245,7 @@ def ppo_update(observer, navigator, opt, traj, adv_list, ret_list):
     retc=torch.cat([r for r in ret_list],dim=0)
     advc=(advc-advc.mean())/(advc.std()+1e-8)
     for _ in range(PPO_EPOCHS):
-        # Forward through Observer (CLEAN — noise only in rollout, not in update)
         zc, vals = observer(gc,pc,wc)
-        # Apply channel noise for Navigator training
         zc_noisy = zc + torch.randn_like(zc) * CHANNEL_NOISE_STD
         dist = navigator(rc, zc_noisy)
         nlp = dist.log_prob(ac).sum(dim=-1); entropy = dist.entropy().sum(dim=-1).mean()
@@ -254,11 +253,20 @@ def ppo_update(observer, navigator, opt, traj, adv_list, ret_list):
         surr1=ratio*advc; surr2=torch.clamp(ratio,1-PPO_CLIP,1+PPO_CLIP)*advc
         ploss = -torch.min(surr1,surr2).mean()
         vloss = nn.MSELoss()(vals.squeeze(-1),retc)
-        loss = ploss + VALUE_COEF*vloss - ENTROPY_COEF*entropy
+        # Diversity on CLEAN z (noise would add artificial drift)
+        td=0.0; npairs=0; off=0
+        for ez in azs_rollout:
+            el=len(ez)
+            if el<2: off+=el; continue
+            ze=zc[off:off+el]
+            for t in range(1,el): td+=torch.norm(ze[t]-ze[t-1],p=2); npairs+=1
+            off+=el
+        dloss = -DIVERSITY_WEIGHT * (td / max(1,npairs))
+        loss = ploss + VALUE_COEF*vloss - ENTROPY_COEF*entropy + dloss
         opt.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(list(observer.parameters())+list(navigator.parameters()),0.5)
         opt.step()
-    return ploss.item(), vloss.item(), entropy.item()
+    return ploss.item(), vloss.item(), entropy.item(), dloss.item()
 
 
 def evaluate(observer, navigator, num_eps=200):
@@ -372,13 +380,13 @@ if __name__=="__main__":
         traj=collect_trajectories(observer,navigator,ep_per_update)
         ag,ap,aw,ar,aa,alp,are_,av_,at_,azs=traj
         adv,ret=compute_gae(are_,av_,at_,observer,ag,ap,aw)
-        pl,vl,ent=ppo_update(observer,navigator,opt,traj,adv,ret)
+        pl,vl,ent,dl=ppo_update(observer,navigator,opt,traj,adv,ret,azs)
         ep_counter+=ep_per_update
         if ep_counter%200==0 or ep_counter>=PPO_EPISODES:
             ev=evaluate(observer,navigator,num_eps=50)
             ppo_hist["success"].append(ev["neur_success"]); ppo_hist["wall_hits"].append(ev["wall_hits_neur"])
             ppo_hist["entropy"].append(ent)
-            print(f"  PPO ep {ep_counter:5d}: succ={ev['neur_success']:.1%} walls={ev['wall_hits_neur']:.2f} ent={ent:.3f}")
+            print(f"  PPO ep {ep_counter:5d}: succ={ev['neur_success']:.1%} walls={ev['wall_hits_neur']:.2f} ent={ent:.3f} div={dl:.4f}")
 
     print("\n"+"="*40)
     eval_r=evaluate(observer,navigator,num_eps=200)

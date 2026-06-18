@@ -339,7 +339,7 @@ def ppo_update(observer, navigator, opt, trajectories, advantages_list, returns_
         z_current, values = observer(grids_cat, pos_cat, walls_cat_in)
         # Rebuild temporal stack from current policy's z (NOT rollout cache!)
         z_stacked_current = build_temporal_stack(z_current, all_zs_rollout, grids_cat.shape[0])
-        dist, wall_pred = navigator(z_stacked_current, radars_cat, z_stacked_current)
+        dist, wall_pred = navigator(radars_cat, z_stacked_current)
         new_log_probs = dist.log_prob(actions_cat).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1).mean()
 

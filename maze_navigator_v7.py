@@ -36,7 +36,7 @@ MAX_STEPS = 50
 BATCH = 16
 WARMUP_EPOCHS = 1000
 PPO_EPOCHS = 4
-PPO_EPISODES = 6000
+PPO_EPISODES = 8000
 PPO_CLIP = 0.2
 GAE_LAMBDA = 0.95
 GAMMA = 0.99
@@ -44,14 +44,16 @@ LR = 1e-3
 RL_LR = 1e-3
 ENTROPY_COEF = 0.005
 VALUE_COEF = 0.5
-DIVERSITY_WEIGHT = 0.10        # Fixed moderate diversity (adaptive bumps if stalled)
-WALL_RECON_COEF = 0.1           # Auxiliary reconstruction loss weight
+DIVERSITY_WEIGHT_INIT = 0.15    # Linear decay from 0.15→0.01 (v6 sweet spot: 0.025)
+DIVERSITY_WEIGHT_FINAL = 0.01
+WALL_RECON_COEF = 0.1
 WALL_COLLISION_PENALTY = -10.0
+WALL_ADJACENCY_PENALTY = -0.3  # Only when wall_count_3x3 > 0
 GOAL_REWARD = 10.0
 STEP_PENALTY = -0.05
 TARGET_THRESH = 0.5
-WALL_FEATURE_DIM = 5           # [dist_up, dist_down, dist_left, dist_right, wall_count_3x3]
-TEMPORAL_WINDOW = 3             # Stack current + 2 previous z vectors
+WALL_FEATURE_DIM = 5
+TEMPORAL_WINDOW = 3
 
 # --- ENVIRONMENT ---
 
@@ -509,20 +511,17 @@ if __name__ == "__main__":
     print("NEURALESE v7 — Temporal Stacking + Auxiliary Reconstruction")
     print("=" * 60)
     print(f"  Temporal window: {TEMPORAL_WINDOW} z-vectors stacked")
-    print(f"  Rewards: delta-Manhattan (NOT continuous proximity)")
-    print(f"  Aux loss: wall recon (α={WALL_RECON_COEF})")
-    print(f"  Navigator input: {Navigator.input_dim}D")
+    print(f"  Diversity: {DIVERSITY_WEIGHT_INIT}→{DIVERSITY_WEIGHT_FINAL} linear decay")
+    print(f"  Reward: continuous distance + wall-adjacency penalty ({WALL_ADJACENCY_PENALTY})")
 
     print("\n[Phase 1] Warm-Start...")
     observer = ObserverActorCritic(); navigator = Navigator()
     warmup_hist = warm_start(observer, navigator)
 
-    print("\n[Phase 2] PPO Training (adaptive diversity)...")
+    print("\n[Phase 2] PPO + Linear Diversity Decay...")
     opt = optim.Adam(list(observer.parameters()) + list(navigator.parameters()), lr=RL_LR)
     ppo_history = {"success": [], "wall_hits": [], "entropy": [], "div_loss": [], "wall_loss": []}
     ep_counter = 0; episodes_per_update = 32
-    div_weight = DIVERSITY_WEIGHT
-    last_success = 0.0; stall_count = 0
 
     while ep_counter < PPO_EPISODES:
         trajectories = collect_trajectories(observer, navigator, episodes_per_update)
@@ -531,6 +530,10 @@ if __name__ == "__main__":
 
         advantages, returns = compute_gae(all_rewards, all_values, all_terminated,
                                           observer, all_obs_grids, all_obs_pos, all_obs_walls)
+
+        # Linear diversity decay: interpolate from init to final
+        progress = min(1.0, ep_counter / PPO_EPISODES)
+        div_weight = DIVERSITY_WEIGHT_INIT + (DIVERSITY_WEIGHT_FINAL - DIVERSITY_WEIGHT_INIT) * progress
 
         p_loss, v_loss, ent, div, wall_l = ppo_update(observer, navigator, opt, trajectories,
                                                        advantages, returns, all_zs, all_obs_walls,
@@ -544,17 +547,6 @@ if __name__ == "__main__":
             ppo_history["entropy"].append(ent)
             ppo_history["div_loss"].append(div)
             ppo_history["wall_loss"].append(wall_l)
-
-            # Adaptive diversity: if success stalls for 5 evals, bump diversity
-            if eval_r["neur_success"] <= last_success + 0.02:
-                stall_count += 1
-            else:
-                stall_count = 0
-            if stall_count >= 5:
-                div_weight = min(0.3, div_weight * 1.5)
-                stall_count = 0
-                print(f"    → Adaptive bump: div_weight = {div_weight:.3f}")
-            last_success = eval_r["neur_success"]
 
             print(f"  PPO ep {ep_counter:5d}: succ={eval_r['neur_success']:.1%} "
                   f"walls={eval_r['wall_hits_neur']:.2f} ent={ent:.3f} "

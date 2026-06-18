@@ -1,0 +1,679 @@
+"""
+Neuralese Remote Brain v4 — PPO Actor-Critic with Shared Observer Trunk
+Key improvements over v3 (per Gemini Pro review):
+1. Observer gets Critic head (sees full MDP → accurate V(s))
+2. Navigator uses state-independent learnable log_std (prevents entropy collapse)
+3. PPO with GAE (trust-region clipping prevents Observer language from breaking)
+4. Keep A* warm-start (Rosetta Stone for initial communication)
+5. No repulsion field — the Observer learns to encode safe waypoints naturally
+"""
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.distributions as D
+import numpy as np
+import heapq
+from pathlib import Path
+from collections import deque
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# --- CONFIG ---
+GRID_SIZE = 10
+WALL_PROB = 0.20
+LATENT_DIM = 12
+HIDDEN = 128
+STEP_CAP = 0.5
+MAX_STEPS = 50
+BATCH = 16
+WARMUP_EPOCHS = 1000
+PPO_EPOCHS = 8
+PPO_EPISODES = 3000    # Total RL episodes
+PPO_CLIP = 0.2
+GAE_LAMBDA = 0.95
+GAMMA = 0.99
+LR = 1e-3
+RL_LR = 3e-4
+ENTROPY_COEF = 0.01
+VALUE_COEF = 0.5
+WALL_PENALTY = -10.0
+GOAL_REWARD = 10.0
+STEP_PENALTY = -0.05
+TARGET_THRESH = 0.5
+
+# --- ENVIRONMENT ---
+
+def gen_maze(wall_prob=WALL_PROB):
+    for _ in range(100):
+        grid = (np.random.rand(GRID_SIZE, GRID_SIZE) < wall_prob).astype(np.float32)
+        start = (0, 0)
+        target = (GRID_SIZE - 1, GRID_SIZE - 1)
+        grid[start] = 0.0
+        grid[target] = 0.0
+        if bfs_reachable(grid, start, target):
+            return torch.tensor(grid), torch.tensor(start, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)
+    grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    return torch.tensor(grid), torch.tensor((0, 0), dtype=torch.float32), torch.tensor((GRID_SIZE-1, GRID_SIZE-1), dtype=torch.float32)
+
+def bfs_reachable(grid, start, target):
+    q = deque([start])
+    visited = {start}
+    while q:
+        r, c = q.popleft()
+        if (r, c) == target:
+            return True
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE and grid[nr, nc] == 0 and (nr, nc) not in visited:
+                visited.add((nr, nc))
+                q.append((nr, nc))
+    return False
+
+def get_radar(grid, pos_r, pos_c):
+    radar = torch.ones(3, 3)
+    for i in range(3):
+        for j in range(3):
+            nr, nc = int(pos_r) + i - 1, int(pos_c) + j - 1
+            if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE:
+                radar[i, j] = grid[nr, nc]
+    return radar.flatten()
+
+def a_star_path(grid, start, target):
+    sr, sc = int(start[0].item()), int(start[1].item())
+    tr, tc = int(target[0].item()), int(target[1].item())
+    g_score = {(sr, sc): 0}
+    parent = {(sr, sc): None}
+    open_set = [(abs(sr-tr) + abs(sc-tc), sr, sc)]
+    while open_set:
+        _, r, c = heapq.heappop(open_set)
+        if (r, c) == (tr, tc):
+            path = []
+            curr = (tr, tc)
+            while curr is not None:
+                path.append(curr)
+                curr = parent[curr]
+            path.reverse()
+            return path
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE and grid[nr, nc] == 0:
+                tentative_g = g_score[(r, c)] + 1
+                if (nr, nc) not in g_score or tentative_g < g_score[(nr, nc)]:
+                    g_score[(nr, nc)] = tentative_g
+                    parent[(nr, nc)] = (r, c)
+                    f = tentative_g + abs(nr-tr) + abs(nc-tc)
+                    heapq.heappush(open_set, (f, nr, nc))
+    return None
+
+# --- MODELS ---
+
+class ObserverActorCritic(nn.Module):
+    """MLP Observer with shared trunk → actor (Neuralese) + critic (value).
+    Observer sees full map → fully observable MDP → accurate V(s)."""
+    def __init__(self):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(GRID_SIZE * GRID_SIZE + 2, HIDDEN), nn.ReLU(),
+            nn.Linear(HIDDEN, HIDDEN), nn.ReLU(),
+            nn.Linear(HIDDEN, HIDDEN), nn.ReLU(),
+        )
+        self.actor_head = nn.Sequential(
+            nn.Linear(HIDDEN, LATENT_DIM),
+            nn.LayerNorm(LATENT_DIM),
+        )
+        self.critic_head = nn.Linear(HIDDEN, 1)
+
+    def forward(self, grid_flat, pos):
+        pos_norm = pos / GRID_SIZE
+        x = torch.cat([grid_flat, pos_norm], dim=-1)
+        shared_feat = self.shared(x)
+        z = self.actor_head(shared_feat)  # 12D Neuralese
+        v = self.critic_head(shared_feat)  # Scalar value
+        return z, v
+
+    def get_latent(self, grid_flat, pos):
+        """For warm-start: only need Neuralese, not value"""
+        pos_norm = pos / GRID_SIZE
+        x = torch.cat([grid_flat, pos_norm], dim=-1)
+        shared_feat = self.shared(x)
+        return self.actor_head(shared_feat)
+
+
+class Navigator(nn.Module):
+    """Sees 3×3 radar (9) + Neuralese (12) → Normal distribution over movement.
+    log_std is a learnable state-independent parameter (prevents entropy collapse near walls)."""
+    def __init__(self):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(9 + LATENT_DIM, HIDDEN), nn.ReLU(),
+            nn.Linear(HIDDEN, HIDDEN), nn.ReLU(),
+        )
+        self.mu_head = nn.Sequential(
+            nn.Linear(HIDDEN, 2),
+            nn.Tanh(),
+        )
+        self.log_std = nn.Parameter(torch.zeros(2))
+
+    def forward(self, radar, z, deterministic=False):
+        feat = self.shared(torch.cat([radar, z], dim=-1))
+        mu = self.mu_head(feat) * STEP_CAP
+        std = torch.exp(self.log_std).expand_as(mu)
+        if deterministic:
+            return mu
+        return D.Normal(mu, std)
+
+# --- SUPERVISED WARM-START ---
+
+def generate_expert_batch(batch_size, wall_prob=WALL_PROB):
+    all_items = []
+    for _ in range(batch_size):
+        grid, start, target = gen_maze(wall_prob)
+        path = a_star_path(grid.numpy(), start, target)
+        if path and len(path) >= 2:
+            for i in range(len(path) - 1):
+                curr_r, curr_c = path[i]
+                next_r, next_c = path[i+1]
+                move = torch.tensor([next_r - curr_r, next_c - curr_c], dtype=torch.float32)
+                pos = torch.tensor([curr_r, curr_c], dtype=torch.float32)
+                radar = get_radar(grid, curr_r, curr_c)
+                all_items.append((
+                    grid.flatten(), pos, radar, move
+                ))
+    return all_items
+
+def warm_start(observer, navigator, epochs=WARMUP_EPOCHS):
+    """Pre-train using A* trajectories. Observer learns state→latent, Navigator learns latent→action."""
+    opt = optim.Adam(list(observer.parameters()) + list(navigator.parameters()), lr=LR)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
+    history = []
+
+    for ep in range(epochs):
+        expert_items = generate_expert_batch(BATCH)
+        if len(expert_items) < BATCH:
+            continue
+
+        idx = np.random.choice(len(expert_items), BATCH, replace=False)
+        grid_batch = torch.stack([expert_items[i][0] for i in idx])
+        pos_batch = torch.stack([expert_items[i][1] for i in idx])
+        radar_batch = torch.stack([expert_items[i][2] for i in idx])
+        target_move = torch.stack([expert_items[i][3] for i in idx])
+
+        z = observer.get_latent(grid_batch, pos_batch)
+        pred_move = navigator(radar_batch, z, deterministic=True)
+
+        task_loss = nn.MSELoss()(pred_move, target_move)
+        l2_loss = 0.001 * torch.norm(z, p=2)
+        loss = task_loss + l2_loss
+
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(observer.parameters()) + list(navigator.parameters()), 1.0)
+        opt.step()
+        scheduler.step()
+        history.append(loss.item())
+
+        if ep % 500 == 0:
+            print(f"  Warm-up {ep:5d}: loss={loss.item():.6f}")
+
+    return history
+
+# --- PPO TRAINING ---
+
+def collect_trajectories(observer, navigator, num_eps):
+    """Collect rollout data for PPO update. Returns lists of transitions.
+    Tracks 'truncated' (timeout) vs 'terminated' (wall/goal) for correct GAE bootstrapping."""
+    all_obs_grids = []
+    all_obs_pos = []
+    all_radars = []
+    all_actions = []
+    all_log_probs = []
+    all_rewards = []
+    all_values = []
+    all_terminated = []  # True = wall/goal (true end), False = timeout or still active
+
+    total_steps = 0
+
+    for _ in range(num_eps):
+        grid, start, target = gen_maze()
+        grid_flat = grid.flatten()
+        pos = start.clone()
+        active = True
+        episode_obs_grids = []
+        episode_obs_pos = []
+        episode_radars = []
+        episode_actions = []
+        episode_log_probs = []
+        episode_rewards = []
+        episode_values = []
+        episode_terminated = []
+
+        for step in range(MAX_STEPS):
+            if not active:
+                break
+
+            r, c = int(pos[0].item()), int(pos[1].item())
+            radar = get_radar(grid, r, c)
+
+            grid_batch = grid_flat.unsqueeze(0)
+            pos_batch = pos.unsqueeze(0)
+            radar_batch = radar.unsqueeze(0)
+
+            with torch.no_grad():
+                z, v = observer(grid_batch, pos_batch)
+                dist = navigator(radar_batch, z)
+                action = dist.sample().squeeze(0)
+                log_prob = dist.log_prob(action).sum(dim=-1)
+
+            new_pos = torch.clamp(pos + action, 0, GRID_SIZE - 1)
+            r_new, c_new = int(round(new_pos[0].item())), int(round(new_pos[1].item()))
+            r_new, c_new = max(0, min(GRID_SIZE-1, r_new)), max(0, min(GRID_SIZE-1, c_new))
+
+            wall_hit = (grid[r_new, c_new] == 1.0)
+            dist_to_target = torch.norm(new_pos - target).item()
+            reached = dist_to_target < TARGET_THRESH
+
+            reward = -dist_to_target * 0.1 + STEP_PENALTY
+            is_terminal = False
+            if wall_hit:
+                reward += WALL_PENALTY
+                active = False
+                is_terminal = True
+            if reached:
+                reward += GOAL_REWARD
+                active = False
+                is_terminal = True
+
+            episode_obs_grids.append(grid_flat)
+            episode_obs_pos.append(pos)
+            episode_radars.append(radar)
+            episode_actions.append(action)
+            episode_log_probs.append(log_prob.item())
+            episode_rewards.append(reward)
+            episode_values.append(v.item())
+            episode_terminated.append(is_terminal)
+
+            pos = new_pos
+            total_steps += 1
+
+        # After loop: if episode didn't truly terminate, record V(next_state) for GAE bootstrap
+        if episode_obs_grids:
+            all_obs_grids.append(torch.stack(episode_obs_grids))
+            all_obs_pos.append(torch.stack(episode_obs_pos))
+            all_radars.append(torch.stack(episode_radars))
+            all_actions.append(torch.stack(episode_actions))
+            all_log_probs.append(episode_log_probs)
+            all_rewards.append(episode_rewards)
+            all_values.append(episode_values)
+            all_terminated.append(episode_terminated)
+
+    return (all_obs_grids, all_obs_pos, all_radars, all_actions,
+            all_log_probs, all_rewards, all_values, all_terminated, total_steps)
+
+
+def compute_gae(rewards_list, values_list, terminated_list, observer, all_obs_grids, all_obs_pos):
+    """Compute GAE with correct bootstrapping: 0 for true termination, V(s) for timeout."""
+    all_advantages = []
+    all_returns = []
+
+    for i in range(len(rewards_list)):
+        rewards = rewards_list[i]
+        values = values_list[i]
+        terminated = terminated_list[i]
+        grids = all_obs_grids[i]
+        positions = all_obs_pos[i]
+
+        T = len(rewards)
+        advantages = torch.zeros(T)
+        returns = torch.zeros(T)
+
+        # Get V(s_{T+1}) for timeout episodes (last state's value)
+        last_step_v = 0.0
+        if not terminated[-1]:
+            # Episode ended by timeout — bootstrap from Observer's V(last_state)
+            with torch.no_grad():
+                _, v_last = observer(grids[-1:], positions[-1:])
+                last_step_v = v_last.item()
+
+        gae = 0.0
+        next_value = last_step_v
+
+        for t in reversed(range(T)):
+            mask_t = 0.0 if terminated[t] else 1.0
+            delta = rewards[t] + GAMMA * next_value * mask_t - values[t]
+            gae = delta + GAMMA * GAE_LAMBDA * mask_t * gae
+            advantages[t] = gae
+            returns[t] = gae + values[t]
+
+            if terminated[t]:
+                next_value = 0.0
+            else:
+                next_value = values[t]
+
+        all_advantages.append(advantages)
+        all_returns.append(returns)
+
+    return all_advantages, all_returns
+
+
+def ppo_update(observer, navigator, opt, trajectories, advantages_list, returns_list, clip=PPO_CLIP):
+    """PPO update with clipping on probability ratios."""
+    (all_obs_grids, all_obs_pos, all_radars, all_actions,
+     all_log_probs, _, all_values, _, _) = trajectories
+
+    # Concatenate all trajectories into flat tensors
+    grids_cat = torch.cat([g for g in all_obs_grids], dim=0)
+    pos_cat = torch.cat([p for p in all_obs_pos], dim=0)
+    radars_cat = torch.cat([r for r in all_radars], dim=0)
+    actions_cat = torch.cat([a for a in all_actions], dim=0)
+    old_log_probs_cat = torch.tensor([lp for lps in all_log_probs for lp in lps], dtype=torch.float32)
+    old_values_cat = torch.tensor([v for vs in all_values for v in vs], dtype=torch.float32)
+    advantages_cat = torch.cat([a for a in advantages_list], dim=0)
+    returns_cat = torch.cat([r for r in returns_list], dim=0)
+
+    # Normalize advantages
+    advantages_cat = (advantages_cat - advantages_cat.mean()) / (advantages_cat.std() + 1e-8)
+
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
+    total_entropy = 0.0
+
+    for _ in range(PPO_EPOCHS):
+        # Forward pass
+        z, values = observer(grids_cat, pos_cat)
+        dist = navigator(radars_cat, z)
+        new_log_probs = dist.log_prob(actions_cat).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1).mean()
+
+        # PPO clipped objective
+        ratio = torch.exp(new_log_probs - old_log_probs_cat)
+        surr1 = ratio * advantages_cat
+        surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * advantages_cat
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        # Value loss (MSE)
+        value_loss = nn.MSELoss()(values.squeeze(-1), returns_cat)
+
+        # Combined loss
+        loss = policy_loss + VALUE_COEF * value_loss - ENTROPY_COEF * entropy
+
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(observer.parameters()) + list(navigator.parameters()), 1.0)
+        opt.step()
+
+        total_policy_loss += policy_loss.item()
+        total_value_loss += value_loss.item()
+        total_entropy += entropy.item()
+
+    n = PPO_EPOCHS
+    return total_policy_loss / n, total_value_loss / n, total_entropy / n
+
+# --- EVALUATION ---
+
+def evaluate(observer, navigator, num_eps=200):
+    neur_success, neur_steps = 0, 0
+    greedy_success, greedy_steps = 0, 0
+    wall_hits = 0
+
+    for _ in range(num_eps):
+        grid, start, target = gen_maze()
+        pos = start.clone()
+        for step in range(MAX_STEPS):
+            grid_flat = grid.flatten().unsqueeze(0)
+            pos_batch = pos.unsqueeze(0)
+            radar = get_radar(grid, int(pos[0].item()), int(pos[1].item())).unsqueeze(0)
+
+            with torch.no_grad():
+                z, _ = observer(grid_flat, pos_batch)
+                action = navigator(radar, z, deterministic=True).squeeze(0)
+
+            new_pos = torch.clamp(pos + action, 0, GRID_SIZE - 1)
+            r, c = int(round(new_pos[0].item())), int(round(new_pos[1].item()))
+            r, c = max(0, min(GRID_SIZE-1, r)), max(0, min(GRID_SIZE-1, c))
+
+            if grid[r, c] == 1.0:
+                wall_hits += 1
+                break
+
+            pos = new_pos
+            dist = torch.norm(pos - target).item()
+            if dist < TARGET_THRESH:
+                neur_success += 1
+                neur_steps += step + 1
+                break
+        else:
+            neur_steps += MAX_STEPS
+
+        # Greedy baseline
+        path = a_star_path(grid.numpy(), start, target)
+        if path:
+            greedy_success += 1
+            greedy_steps += len(path) - 1
+        else:
+            greedy_steps += MAX_STEPS
+
+    n_eval = max(1, neur_success if neur_success > 0 else num_eps)
+    return {
+        "neur_success": neur_success / num_eps,
+        "neur_steps": neur_steps / n_eval,
+        "greedy_success": greedy_success / num_eps,
+        "greedy_steps": greedy_steps / max(1, greedy_success),
+        "wall_hits_neur": wall_hits / num_eps,
+    }
+
+# --- VERIFICATION ---
+
+def latent_evolution_test(observer, navigator, out_dir):
+    for attempt in range(20):
+        grid, start, target = gen_maze()
+        path = a_star_path(grid.numpy(), start, target)
+        if path and len(path) >= 5 and np.sum(grid.numpy()) > 2:
+            break
+
+    print(f"  Path length: {len(path)}, Walls: {int(grid.sum().item())}")
+
+    pos = start.clone()
+    latents = []
+    positions = []
+
+    for step in range(min(len(path), 30)):
+        grid_flat = grid.flatten().unsqueeze(0)
+        pos_batch = pos.unsqueeze(0)
+        radar = get_radar(grid, int(pos[0].item()), int(pos[1].item())).unsqueeze(0)
+
+        with torch.no_grad():
+            z, _ = observer(grid_flat, pos_batch)
+            action = navigator(radar, z, deterministic=True).squeeze(0)
+
+        latents.append(z.squeeze(0).numpy())
+        positions.append(pos.clone().numpy())
+
+        new_pos = torch.clamp(pos + action, 0, GRID_SIZE - 1)
+        r, c = int(round(new_pos[0].item())), int(round(new_pos[1].item()))
+        if grid[r, c] == 1.0:
+            break
+        pos = new_pos
+
+        if torch.norm(pos - target).item() < TARGET_THRESH:
+            break
+
+    latents_arr = np.array(latents)
+    positions_arr = np.array(positions)
+
+    z_std = np.std(latents_arr, axis=0).mean()
+    distances = [np.linalg.norm(latents_arr[i] - latents_arr[0]) for i in range(len(latents_arr))]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    ax = axes[0]
+    ax.plot(distances, 'b-o', markersize=8)
+    ax.set_title("Latent Distance from t=0")
+    ax.set_xlabel("Step"); ax.set_ylabel("||z_t - z_0||")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    for d in range(min(8, LATENT_DIM)):
+        ax.plot(latents_arr[:, d], alpha=0.5, label=f"dim {d}", marker='o', markersize=4)
+    ax.set_title("Latent Dimensions over Steps")
+    ax.set_xlabel("Step"); ax.legend(fontsize=6)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2]
+    grid_np = grid.numpy()
+    ax.imshow(grid_np.T, cmap='gray_r', origin='lower', alpha=0.3)
+    ax.plot(positions_arr[:, 0], positions_arr[:, 1], 'b-', linewidth=2, label='Agent')
+    ax.scatter(positions_arr[0, 0], positions_arr[0, 1], c='green', s=100, marker='o', label='Start')
+    ax.scatter(target[0].item(), target[1].item(), c='red', s=150, marker='*', label='Target')
+    if path:
+        path_arr = np.array(path)
+        ax.plot(path_arr[:, 0], path_arr[:, 1], 'r--', alpha=0.3, label='A* path')
+    ax.set_xlim(-0.5, GRID_SIZE-0.5); ax.set_ylim(-0.5, GRID_SIZE-0.5)
+    ax.set_title("Agent Trajectory on Maze"); ax.legend(fontsize=7)
+
+    plt.suptitle(f"Latent Evolution Test — z_std={z_std:.4f} "
+                 f"({'EMERGENT' if z_std > 0.05 else 'STATIC'})", fontsize=14)
+    plt.tight_layout()
+    fname = out_dir / "maze_latent_evolution_v4.png"
+    fig.savefig(fname, dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+    print(f"  Latent std: {z_std:.4f} → {'EMERGENT RELATIVE INSTRUCTIONS' if z_std > 0.05 else 'STATIC ENCODING'}")
+    print(f"  Max drift from t=0: {max(distances):.4f}")
+
+    return z_std, latents_arr
+
+# --- VISUALIZATION ---
+
+def plot_summary(warmup_hist, ppo_history, eval_results, out_dir):
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    ax = axes[0, 0]
+    ax.plot(warmup_hist, alpha=0.5, color='blue')
+    ax.set_title("Phase 1: Expert Warm-Start (A*)")
+    ax.set_xlabel("Epoch"); ax.set_ylabel("MSE")
+    ax.set_yscale("log"); ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    ax.plot(ppo_history["success"], alpha=0.6, color='orange', label="Eval Success Rate")
+    ax.plot(ppo_history["wall_hits"], alpha=0.6, color='red', label="Wall Hits/ep")
+    ax.set_title("Phase 2: PPO Training (evaluated every 200 eps)")
+    ax.set_xlabel("Episode"); ax.set_ylabel("Rate")
+    ax.legend(loc='upper left')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    labels = ["Neuralese", "A* (optimal)"]
+    successes = [eval_results["neur_success"], eval_results["greedy_success"]]
+    steps = [eval_results["neur_steps"], eval_results["greedy_steps"]]
+    x = np.arange(2); width = 0.35
+    bars1 = ax.bar(x - width/2, successes, width, label="Success Rate", color="blue", alpha=0.7)
+    ax2 = ax.twinx()
+    bars2 = ax2.bar(x + width/2, steps, width, label="Avg Steps", color="red", alpha=0.7)
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    ax.set_ylabel("Success Rate"); ax2.set_ylabel("Avg Steps")
+    for bar, val in zip(bars1, successes):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height()+0.02, f"{val:.1%}", ha='center')
+    for bar, val in zip(bars2, steps):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height()+0.1, f"{val:.1f}", ha='center')
+    ax.set_title("Final Evaluation (200 mazes)")
+    ax.set_ylim(0, 1.1)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    ax = axes[1, 1]
+    metrics_text = (
+        f"Algorithm: PPO (clip={PPO_CLIP}, λ={GAE_LAMBDA})\n"
+        f"Batch: {BATCH} eps, {PPO_EPOCHS} epochs/update\n"
+        f"Observer: Actor-Critic (shared trunk)\n"
+        f"Navigator: learnable log_std (state-independent)\n"
+        f"Wall hits/ep: {eval_results['wall_hits_neur']:.2f}\n"
+        f"Total PPO episodes: {PPO_EPISODES}\n"
+    )
+    ax.text(0.1, 0.5, metrics_text, fontfamily='monospace', fontsize=10, va='center',
+            transform=ax.transAxes)
+    ax.set_title("Config & Diagnostics")
+    ax.axis('off')
+
+    plt.suptitle("Neuralese Remote Brain v4 — PPO Actor-Critic", fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    fname = out_dir / "maze_results_v4.png"
+    fig.savefig(fname, dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {fname}")
+
+# --- MAIN ---
+
+if __name__ == "__main__":
+    out_dir = Path(__file__).parent / "output"
+    out_dir.mkdir(exist_ok=True)
+
+    print("=" * 60)
+    print("NEURALESE REMOTE BRAIN v4 — PPO Actor-Critic")
+    print("=" * 60)
+    print(f"  Observer: Actor-Critic (shared trunk → 12D Neuralese + V(s))")
+    print(f"  Navigator: μ(z,radar) + learnable log_std → Normal distribution")
+    print(f"  Algorithm: PPO (clip={PPO_CLIP}, λ={GAE_LAMBDA}, γ={GAMMA})")
+    print(f"  Warm-start: {WARMUP_EPOCHS} epochs on A* trajectories")
+
+    # Phase 1: Warm-start
+    print("\n[Phase 1] Expert Warm-Start...")
+    observer = ObserverActorCritic()
+    navigator = Navigator()
+    warmup_hist = warm_start(observer, navigator)
+
+    # Phase 2: PPO
+    print("\n[Phase 2] PPO Training...")
+    opt = optim.Adam(list(observer.parameters()) + list(navigator.parameters()), lr=RL_LR)
+    ppo_history = {"success": [], "wall_hits": [], "p_loss": [], "v_loss": [], "entropy": []}
+    ep_counter = 0
+
+    eval_interval = 200
+    episodes_per_update = 32  # Collect 32 episodes before each PPO update
+
+    while ep_counter < PPO_EPISODES:
+        # Collect trajectories
+        trajectories = collect_trajectories(observer, navigator, episodes_per_update)
+        all_obs_grids, all_obs_pos, all_radars, all_actions, all_log_probs, \
+            all_rewards, all_values, all_terminated, steps = trajectories
+
+        # Compute GAE advantages and returns (with correct timeout bootstrapping)
+        advantages, returns = compute_gae(all_rewards, all_values, all_terminated,
+                                          observer, all_obs_grids, all_obs_pos)
+
+        # PPO update
+        p_loss, v_loss, ent = ppo_update(observer, navigator, opt, trajectories,
+                                         advantages, returns, PPO_CLIP)
+        ppo_history["p_loss"].append(p_loss)
+        ppo_history["v_loss"].append(v_loss)
+        ppo_history["entropy"].append(ent)
+
+        ep_counter += episodes_per_update
+
+        if ep_counter % eval_interval == 0 or ep_counter >= PPO_EPISODES:
+            eval_r = evaluate(observer, navigator, num_eps=50)
+            ppo_history["success"].append(eval_r["neur_success"])
+            ppo_history["wall_hits"].append(eval_r["wall_hits_neur"])
+            print(f"  PPO ep {ep_counter:5d}: success={eval_r['neur_success']:.1%} "
+                  f"walls={eval_r['wall_hits_neur']:.2f} "
+                  f"p_loss={p_loss:.4f} v_loss={v_loss:.4f} ent={ent:.3f}")
+
+    # Final evaluation
+    print("\n" + "=" * 40)
+    print("FINAL EVALUATION (200 mazes):")
+    eval_results = evaluate(observer, navigator, num_eps=200)
+    print(f"  Neuralese: {eval_results['neur_success']:.1%} success, "
+          f"{eval_results['neur_steps']:.1f} avg steps, "
+          f"{eval_results['wall_hits_neur']:.2f} wall hits/ep")
+    print(f"  A* (optimal): {eval_results['greedy_success']:.1%} success, "
+          f"{eval_results['greedy_steps']:.1f} avg steps")
+
+    # Latent evolution test
+    print("\n[Latent Evolution Test]")
+    z_std, latents = latent_evolution_test(observer, navigator, out_dir)
+
+    # Visualize
+    print("\nGenerating plots...")
+    plot_summary(warmup_hist, ppo_history, eval_results, out_dir)
+
+    print(f"\nDone! Outputs in {out_dir}/")

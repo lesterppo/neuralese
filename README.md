@@ -41,28 +41,30 @@ position-dependent relative instructions.
 |-----------|--------|------------|
 | Bandwidth proof (coordinate reconstruction) | ✅ Complete | 1,200× more accurate than text |
 | One-step navigator (warm-start) | ✅ Complete | 100% success (no emergence) |
-| Step-capped navigator | ✅ Complete | Proved static latent when task too easy |
-| **Remote Brain maze navigator** | 🔄 In Progress | **17% success, EMERGENT latents (std 0.30)** |
-| GRU (recurrent) Observer | 🔄 Experimental | Needs tuning |
+| **Remote Brain maze (MLP + PPO + div)** | 🔬 Active | **18% success, EMERGENT latents (std 0.71)** |
+| PPO Actor-Critic (no diversity loss) | ✅ Evaluated | 17% success, STATIC latents (std 0.002) |
+| Repulsion field reward shaping | ❌ Failed | Made things worse (8% success) |
+| GRU (recurrent) Observer | ❌ Regressive | Kills emergence (std 0.03) |
 | Multi-agent broadcast | 📋 Planned | — |
 
-### Breakthrough: Emergent Relative Instructions
+### Breakthrough: PPO + Diversity Loss = Strongest Emergence Yet
 
 The Latent Evolution Test proves the Observer issues **dynamic per-step instructions**,
-not a static full-path encoding. The 12D Neuralese vector changes significantly
-as the Navigator moves around the maze (latent std = 0.30, max drift = 2.65).
+not a static full-path encoding. The 12D Neuralese vector changes dramatically
+as the Navigator moves around the maze.
 
-**Key finding**: MLP architectures force emergence by preventing memorization.
-CNN and GRU architectures, with their spatial/temporal memory, allow the Observer
-to encode the entire path at t=0, producing static latents. The MLP's "weakness"
-(no memory, must reprocess per-step) is the feature that enables emergence.
+| Architecture | Success | Latent Std | Max Drift | Emergence |
+|-------------|---------|-----------|-----------|-----------|
+| MLP + REINFORCE + div (v2) | 17% | 0.30 | 2.65 | ✅ EMERGENT |
+| MLP + PPO + div (v5) | 18% | **0.71** | **8.62** | ✅ EMERGENT (strongest) |
+| MLP + PPO (no div, v4) | 17% | 0.002 | 0.02 | ❌ STATIC |
+| MLP + repulsion field (v3) | 8% | 0.007 | 0.07 | ❌ STATIC |
+| GRU + REINFORCE (v1) | 8.5% | 0.03 | 0.48 | ❌ STATIC |
 
-### Current Bottleneck
-
-Wall avoidance: 0.9 hits/episode across all architectures. Neither diversity loss,
-curriculum learning, distractor training, nor increased wall penalties have
-significantly reduced this. The next breakthrough likely comes from RL reward
-shaping (distance-to-wall repulsion field) rather than architectural changes.
+**Key finding**: Diversity loss computed on CURRENT policy latents (not rollout cache)
+produces the strongest emergence ever observed (std 0.71, 3× the previous best).
+PPO without diversity loss produces static latents — emergence requires explicit
+per-step variation incentive, not just low-variance credit assignment.
 
 ## Quick Start
 
@@ -88,21 +90,24 @@ Output to `output/` directory:
 | File | Purpose |
 |------|---------|
 | `demo.py` | Coordinate reconstruction — proves Neuralese beats text |
+| `maze_navigator_v5.py` | **Active** — PPO Actor-Critic + diversity loss (best emergence) |
+| `maze_navigator_v4.py` | PPO Actor-Critic without diversity (baseline) |
+| `maze_navigator_v3.py` | MLP + repulsion field (failed) |
+| `maze_navigator.py` | GRU Observer + REINFORCE (historical baseline) |
 | `navigator_v2.py` | One-step navigator with supervised warm-start |
 | `constrained_navigator.py` | Step-capped version with obstacle avoidance |
-| `maze_navigator.py` | **Main file** — Remote Brain with MLP/GRU Observer + REINFORCE RL |
 
 ## Development Direction
 
-**Short-term** (push to 30%+ success):
-- [ ] RL reward shaping with distance-to-wall penalty
-- [ ] GRU Observer hyperparameter tuning
-- [ ] Scheduled sampling for Navigator robustness
+**Short-term** (push success rate above 17%):
+- [ ] Scheduled diversity decay tuning (0.15→0.01 over 4000+ episodes)
+- [ ] Longer training runs (8000+ episodes) with moderate diversity weight
+- [ ] Per-step wall proximity penalty (continuous reward, not collision-only)
 
 **Medium-term** (prove production viability):
 - [ ] Multi-agent broadcast — one Observer, N Navigators
 - [ ] Moving obstacles — force reactive Neuralese
-- [ ] Integration with real agent frameworks (LangChain plugin)
+- [ ] Integration with real agent frameworks (LangChain/Hermes plugin)
 
 **Long-term** (generalize to real-world agents):
 - [ ] Multi-modal unified latent space (text + structured data + vision)

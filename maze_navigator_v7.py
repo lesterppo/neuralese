@@ -243,7 +243,6 @@ def collect_trajectories(observer, navigator, num_eps):
         ep_z_stacked, ep_actions, ep_log_probs = [], [], []
         ep_rewards, ep_values, ep_terminated, ep_zs = [], [], [], []
         z_history = []  # Sliding window of last 2 z vectors
-        prev_dist = torch.norm(pos - target).item()  # For Manhattan shaping
 
         for _ in range(MAX_STEPS):
             if not active: break
@@ -268,8 +267,12 @@ def collect_trajectories(observer, navigator, num_eps):
             reached = torch.norm(new_pos - target).item() < TARGET_THRESH
             new_dist = torch.norm(new_pos - target).item()
 
-            # Manhattan distance shaping: reward reduction in distance to goal
-            reward = (prev_dist - new_dist) * 1.0 + STEP_PENALTY  # Positive for getting closer
+            # Continuous distance reward + soft wall-adjacency penalty
+            # Uses continuous distance (proven in v2-v6) + penalty for being next to a wall
+            reward = -new_dist * 0.1 + STEP_PENALTY
+            # Soft wall-adjacency: penalty if any wall in 3x3 radar is adjacent (not continuous proximity)
+            if wall_f[-1] > 0:  # wall_count_3x3 > 0 means at least one wall nearby
+                reward -= 0.3   # Small penalty for being near walls (not loitering-inducing)
             is_terminal = False
             if wall_hit:
                 reward += WALL_COLLISION_PENALTY
@@ -284,7 +287,7 @@ def collect_trajectories(observer, navigator, num_eps):
             ep_rewards.append(reward); ep_values.append(v.item())
             ep_terminated.append(is_terminal); ep_zs.append(z.squeeze(0))
 
-            z_history.append(z); prev_dist = new_dist; pos = new_pos
+            z_history.append(z); pos = new_pos
             if len(z_history) > 2: z_history.pop(0)
 
         if ep_grids:
@@ -293,7 +296,7 @@ def collect_trajectories(observer, navigator, num_eps):
             all_z_stacked.append(torch.stack(ep_z_stacked)); all_actions.append(torch.stack(ep_actions))
             all_log_probs.append(ep_log_probs); all_rewards.append(ep_rewards)
             all_values.append(ep_values); all_terminated.append(ep_terminated)
-            all_zs.append(ep_zs); all_prev_dists.append(prev_dist)
+            all_zs.append(ep_zs)
 
     return (all_obs_grids, all_obs_pos, all_obs_walls, all_radars, all_z_stacked,
             all_actions, all_log_probs, all_rewards, all_values, all_terminated, all_zs)

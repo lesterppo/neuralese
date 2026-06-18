@@ -495,7 +495,7 @@ def plot_summary(warmup_hist, ppo_history, eval_results, out_dir):
     axes[1, 0].set_xticks(x); axes[1, 0].set_xticklabels(["Neuralese", "A*"]); axes[1, 0].set_ylim(0, 1.1); axes[1, 0].grid(True, alpha=0.3, axis='y')
     axes[1, 1].text(0.1, 0.5,
                     f"v7: Temporal stacking (N=3)\nAux wall reconstruction (α={WALL_RECON_COEF})\n"
-                    f"Manhattan distance shaping\nFixed div={DIVERSITY_WEIGHT}\n"
+                    f"Continuous distance + wall-adjacency\nLinear decay {DIVERSITY_WEIGHT_INIT}→{DIVERSITY_WEIGHT_FINAL}\n"
                     f"Wall hits: {eval_results['wall_hits_neur']:.2f}",
                     fontfamily='monospace', fontsize=10, va='center', transform=axes[1, 1].transAxes)
     axes[1, 1].set_title("Config"); axes[1, 1].axis('off')

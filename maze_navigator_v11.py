@@ -1,6 +1,6 @@
 """
 Neuralese Remote Brain v11 — Randomized Start/Goal + Channel Noise
-Per collaborative review:
+Per Gemini Pro Session 5 (c_5c6c5f64a1dac19d):
 
 Fix 1: RANDOMIZE start and target positions (was hardcoded (0,0)→(9,9))
   - The agents were memorizing a macro-route, not learning communication

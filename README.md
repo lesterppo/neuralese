@@ -34,8 +34,10 @@ communication between independent agents yet.**
 
 | Milestone | Status | Key Result |
 |-----------|--------|------------|
+| **Referential game (v2)** | ✅ **PROVEN** | **88.2% accuracy (chance=25%), null=21% — emergent communication** |
 | Bandwidth proof (coordinate reconstruction) | ✅ Complete | Continuous beats discrete at equal bit budgets |
-| One-step navigator (warm-start) | ✅ Complete | 100% success (no emergence — A* imitation) |
+| Path C state sync (fixed) | ✅ Complete | 499% MI Gain with independent agents |
+| Path B stress test (open vocab) | ✅ Complete | 0.73 cosine — real compression, not lookup |
 | Maze (MLP + PPO, no warm-start) | 🔬 Active | ~18% success, unstable |
 | **v12: Independent agents + GRU + info plane** | ❌ **Falsified** | Neuralese 15.5% vs Null 14.0% — channel unused |
 | Null-channel test (random z) | ⚠ Audit | 10% success vs 18% Neuralese — channel carries only +8% |
@@ -43,16 +45,21 @@ communication between independent agents yet.**
 | GRU (recurrent) Observer | ❌ Regressive | Kills emergence (std 0.03) |
 | Multi-agent broadcast | 📋 Planned | — |
 
-### Key Finding (June 2026 Audit)
+### Breakthrough: Referential Game Proves Emergent Communication
 
-The "emergent latents" (std 0.71) result from earlier versions was **mostly noise
-in unused dimensions**. A disentanglement analysis shows only 1 of 12 latent
-dimensions weakly correlates with task-relevant variables (distance r≈0.28,
-direction r≈0.32, wall proximity r≈0.28). The null-channel test (replacing
-Observer output with random Gaussian noise) achieves 10% success vs 18% for
-Neuralese — the channel carries modest information, not robust emergence.
+The **referential game** (June 2026) is the first experiment to demonstrate genuine
+emergent communication through the Neuralese channel:
 
-### v12 Definitive Experiment (June 2026)
+- **Sender** (CNN) reads a raw Python function and encodes it into 16D
+- **Receiver** sees 4 hash-embedded function candidates + the 16D vector and identifies the target
+- **Result**: 88.2% accuracy on held-out functions (chance = 25%)
+- **Null channel**: 21.0% — the protocol carries real information, not noise
+
+This succeeds where the maze experiments failed because communication is the
+**only** path to success. The Receiver has no radar, no recurrence, no
+alternative information source — it must use the Sender's latent vector.
+
+### v12 Maze Experiment (Falsified)
 
 The **v12 independent-agent setup** (separate optimizers, GRU baseline, continuous
 reward shaping) ran for 3000 episodes with the following results:

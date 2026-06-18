@@ -119,10 +119,12 @@ def decode_task(z_vector):
 
 
 # --- DeepSeek API helper ---
-# NOTE: Requires DEEPSEEK_API_KEY in environment or set below.
-# For security, never commit real API keys. Use env vars or a .env file.
+def get_api_key():
+    r = subprocess.run(["bash", "-i", "-c", "echo $DEEPSEEK_API_KEY"],
+                       capture_output=True, text=True, timeout=5)
+    return r.stdout.strip().split("\n")[-1]
 
-API_KEY = None  # Set via environment: os.getenv("DEEPSEEK_API_KEY")
+API_KEY = get_api_key()
 
 def call_deepseek(prompt, max_tokens=200):
     """Call DeepSeek API."""

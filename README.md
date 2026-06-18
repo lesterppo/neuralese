@@ -1,18 +1,17 @@
 # Neuralese — Latent-Space Agent Communication
 
 AI agents communicating via raw hidden-state tensors instead of human language.
-Proven **1,200× more bandwidth-efficient** than tokenized text at equivalent bit rates.
+**Experimental research project — not production-ready.**
 
 ## What It Is
 
-Neuralese is a communication protocol where AI agents bypass human language entirely,
-exchanging high-dimensional latent vectors (12-16D) instead of discrete tokens.
-The key insight: human language (~16.6 bits/token) is a severe bottleneck for
-agent-to-agent communication. Neuralese operates at the full hidden-state
-dimensionality (e.g., 12 × 32 = 384 bits/vector), achieving orders-of-magnitude
-higher information density.
+Neuralese explores whether AI agents can communicate through high-dimensional
+latent vectors instead of discrete tokens. The hypothesis: human language
+(~16.6 bits/token) is a bottleneck for agent-to-agent communication, and
+continuous latent vectors could carry more information more efficiently.
 
-**Proven across 5 benchmarks and 4 AI models (DeepSeek, Nemotron, Gemini, Claude).**
+**Current status: Three benchmark paths established, but no proof of emergent
+communication between independent agents yet.**
 
 ## Architecture
 
@@ -31,123 +30,171 @@ higher information density.
 └─────────────────────────────────────────────────────┘
 ```
 
-The Observer acts as a "remote brain" — it must compress path-planning knowledge
-into the 12D bottleneck, and the Navigator must decode it into step-by-step movement
-using only its local radar. This constraint **forces emergent communication**:
-the Observer cannot just encode a static plan; it must issue dynamic,
-position-dependent relative instructions.
-
 ## Current Status
 
 | Milestone | Status | Key Result |
 |-----------|--------|------------|
-| Bandwidth proof (coordinate reconstruction) | ✅ Complete | 1,200× more accurate than text |
-| One-step navigator (warm-start) | ✅ Complete | 100% success (no emergence) |
-| **Remote Brain maze (MLP + PPO + div)** | 🔬 Active | **18% success, EMERGENT latents (std 0.71)** |
-| PPO Actor-Critic (no diversity loss) | ✅ Evaluated | 17% success, STATIC latents (std 0.002) |
-| Repulsion field reward shaping | ❌ Failed | Made things worse (8% success) |
+| Bandwidth proof (coordinate reconstruction) | ✅ Complete | Continuous beats discrete at equal bit budgets |
+| One-step navigator (warm-start) | ✅ Complete | 100% success (no emergence — A* imitation) |
+| Maze (MLP + PPO, no warm-start) | 🔬 Active | ~18% success, unstable |
+| **v12: Independent agents + GRU + info plane** | ❌ **Falsified** | Neuralese 15.5% vs Null 14.0% — channel unused |
+| Null-channel test (random z) | ⚠ Audit | 10% success vs 18% Neuralese — channel carries only +8% |
+| Disentanglement analysis | ⚠ Audit | 1 of 12 latent dimensions has weak task correlation (r≈0.3) |
 | GRU (recurrent) Observer | ❌ Regressive | Kills emergence (std 0.03) |
 | Multi-agent broadcast | 📋 Planned | — |
 
-### Breakthrough: PPO + Diversity Loss = Strongest Emergence Yet
+### Key Finding (June 2026 Audit)
 
-The Latent Evolution Test proves the Observer issues **dynamic per-step instructions**,
-not a static full-path encoding.
+The "emergent latents" (std 0.71) result from earlier versions was **mostly noise
+in unused dimensions**. A disentanglement analysis shows only 1 of 12 latent
+dimensions weakly correlates with task-relevant variables (distance r≈0.28,
+direction r≈0.32, wall proximity r≈0.28). The null-channel test (replacing
+Observer output with random Gaussian noise) achieves 10% success vs 18% for
+Neuralese — the channel carries modest information, not robust emergence.
 
-### Three-Path Benchmark Results
+### v12 Definitive Experiment (June 2026)
 
-| Path | Task | Metric | Result |
-|------|------|--------|--------|
-| A — Bridge v3 | Hermes context compression (16D) | Exact match | **97.5%** |
-| B — Instructions | Code-editing task via 12D | Exact match | **98.0%** |
-| C — Sync | State synchronization 12D | MI Gain | **116,143%** |
+The **v12 independent-agent setup** (separate optimizers, GRU baseline, continuous
+reward shaping) ran for 3000 episodes with the following results:
 
-### Inter-Model Communication Matrix
+| Metric | Neuralese | Null Channel | GRU Baseline |
+|--------|-----------|-------------|--------------|
+| Success rate | 15.5% | 14.0% | 7.5% |
+| Wall collisions/ep | 0.84 | 0.86 | 0.93 |
+| Active z dimensions | 0/8 | — | — |
+| Max z→action correlation | 0.074 | — | — |
 
-| Observer | Navigator | File match | Notes |
-|----------|-----------|-----------|-------|
-| DeepSeek | DeepSeek | ✓ 3/3 | Same action as full text |
-| DeepSeek | Nemotron | ✓ 1/1 | Same file+action |
-| DeepSeek | Gemini Flash | ✓ 2/2 | **3 tokens/response** |
-| DeepSeek | Claude | ~ | Responds, wants file contents |
+**Verdict: NULL HYPOTHESIS NOT REJECTED.** The Observer→z channel carries
+no significant information (+1.5% over random noise, below the 5% significance
+threshold). After training, 0 of 8 latent dimensions correlate with the
+Navigator's actions. The Navigator relies entirely on its own 3×3 radar,
+ignoring the Observer's instructions.
 
-Neuralese context produces the same LLM behavior as full text across models.
-The Observer/Decoder (PyTorch) handles compression. LLMs receive clean decoded text.
+## Three-Path Benchmark Results (Corrected)
+
+| Path | Task | Old Claim | Corrected Result | Issue Found |
+|------|------|-----------|-----------------|-------------|
+| A — Bridge v3 | Context compression (16D) | 97.5% exact | 6.5% (fixed vocab) | Fixed 30-file lookup table; bottleneck 17× wider than info content |
+| B — Instructions | Code-editing via 12D | 98.0% exact | 100% edit, 0.73 file cosine (open vocab) | Edit type is 6-way trivial; open-vocab file cos plateaus at 0.73 |
+| C — Sync | State sync (12D→8D) | 116,143% MI | 499% MI (overlap=0), 4,041% (overlap=10) | Old: both agents' states from shared latent. Fixed: independent states |
+
+### Path C Overlap Sweep (Corrected)
+
+| Overlap | Description | MSE | Baseline MSE | Oracle MSE | MI Gain |
+|---------|-------------|-----|-------------|------------|---------|
+| 0 | Fully independent agents (hardest) | 0.054 | 0.324 | 0.324 | 499% |
+| 3 | 3 shared, 7 private features | 0.007 | 0.220 | 0.222 | 3,204% |
+| 10 | Fully shared (old confounded setup) | 0.000045 | 0.0005 | 0.0009 | 1,004% |
+
+With independent agents (overlap=0) and an 8D bottleneck (tighter than 10D source),
+the channel provides genuine but modest improvement over baseline. MI Gain drops
+as overlap increases — exactly the expected behavior when baseline already has
+access to shared information.
+
+### Path B Stress Test (Open vs Closed Vocabulary)
+
+| Bottleneck | Open Vocab File Cos | Closed Vocab File Cos | Open Line MAE | Closed Line MAE |
+|-----------|--------------------|----------------------|--------------|----------------|
+| 2D | 0.700 | 0.718 | 492 | 507 |
+| 4D | 0.700 | 0.719 | 166 | 465 |
+| 8D | 0.722 | 0.735 | 79 | 67 |
+| 16D | 0.730 | 0.826 | 77 | 65 |
+
+With open vocabulary (hash-based on arbitrary UUID strings), file cosine
+similarity plateaus at 0.73. The closed vocabulary achieves 0.83 — a 13%
+advantage from fixed-set memorization. The old "97.5% exact match" claim
+only holds for fixed-vocabulary one-hot targets.
+
+## Inter-Model Communication
+
+The cross-model test (`cross_model_test.py`) measures autoencoder roundtrip
+accuracy — it encodes a task into Neuralese, *decodes back to text*, then feeds
+the decoded text to an LLM. This tests whether the autoencoder preserves enough
+information for the LLM to take the same action, **not whether the LLM
+understands raw latent vectors**. The "inter-model matrix" results reflect
+autoencoder fidelity, not genuine latent-space communication.
 
 ## Quick Start
 
 ```bash
-# Requirements
 pip install torch numpy scikit-learn matplotlib
 
 # Bandwidth proof (30 seconds)
 python demo.py
 
-# Maze navigator (5 minutes)
-python maze_navigator.py
-```
+# Maze audit (null-channel + disentanglement, 5 minutes)
+python maze_audit.py
 
-Output to `output/` directory:
-- `neuralese_results.png` — training curves + bandwidth comparison
-- `neuralese_tsne.png` — latent space topology
-- `maze_latent_evolution.png` — latent vector evolution across steps
-- `maze_results.png` — success rate + evaluation bars
+# Path C sweep (overlap experiment, 10 minutes)
+python path_c_sync.py
+
+# Path B stress test (open vs closed vocabulary, 3 minutes)
+python path_b_stress.py
+```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `demo.py` | Coordinate reconstruction — proves Neuralese beats text |
-| `maze_navigator_v5.py` | **Active** — PPO Actor-Critic + diversity loss (best emergence) |
-| `maze_navigator_v4.py` | PPO Actor-Critic without diversity (baseline) |
-| `maze_navigator_v3.py` | MLP + repulsion field (failed) |
-| `maze_navigator.py` | GRU Observer + REINFORCE (historical baseline) |
-| `navigator_v2.py` | One-step navigator with supervised warm-start |
-| `constrained_navigator.py` | Step-capped version with obstacle avoidance |
+| `demo.py` | Continuous vs discrete communication bandwidth proof |
+| `maze_audit.py` | **New** — Null-channel test + disentanglement + no warm-start |
+| `maze_v12_independent.py` | **New** — Independent agents, GRU baseline, info plane analysis |
+| `path_c_sync.py` | **Fixed** — Independent-agent state sync with overlap sweep |
+| `path_b_stress.py` | **New** — Open vs closed vocabulary compression stress test |
+| `path_a_bridge_v3.py` | Legacy — Fixed-vocab autoencoder (overcapacity bottleneck) |
+| `path_b_instructions.py` | Legacy — Fixed-vocab instruction autoencoder |
+| `maze_navigator_v5.py` | Legacy — PPO + diversity loss (warm-start confound) |
+| `maze_navigator_v10.py` | Legacy — Corrected reward (still warm-start) |
+| `maze_navigator_v11.py` | Legacy — Channel noise + fixed pairs |
+| `neuralese_bridge.py` | Legacy — v2 learnable embeddings bridge |
+| `cross_model_test.py` | Legacy — Autoencoder roundtrip test (not latent communication) |
+
+## Known Limitations
+
+1. **No independent multi-agent setup exists.** All "two-agent" experiments train
+   Observer and Navigator jointly with a shared optimizer and loss function.
+   For genuine inter-agent communication, agents must be trained independently
+   with separate objectives and no access to each other's ground truth.
+
+2. **Fixed-vocabulary benchmarks inflate results.** The old Path A/B used fixed
+   vocabularies of 30-128 items that can be memorized through an overcapacity
+   bottleneck. The new `path_b_stress.py` uses hash embeddings on arbitrary
+   strings for a fairer test.
+
+3. **Maze channel information is marginal.** The null-channel test shows only
+   +8% improvement over random noise. The disentanglement analysis reveals
+   11 of 12 latent dimensions are unused. The "emergent" latents from earlier
+   versions likely reflect noise in unused dimensions amplified by diversity
+   loss, not structured communication.
+
+4. **Cross-model test is a text roundtrip**, not latent communication. The LLM
+   receives decoded text, not raw latent vectors. A genuine test would require
+   the LLM to process Neuralese vectors directly (e.g., through embedding-space
+   injection or learned adapters).
 
 ## Development Direction
 
-**Short-term** (push success rate above 17%):
-- [ ] Scheduled diversity decay tuning (0.15→0.01 over 4000+ episodes)
-- [ ] Longer training runs (8000+ episodes) with moderate diversity weight
-- [ ] Per-step wall proximity penalty (continuous reward, not collision-only)
+**Short-term (fix fundamentals first):**
+- [ ] Train Observer and Navigator independently with separate objectives
+- [ ] Add GRU-no-Observer baseline (does recurrence beat the channel?)
+- [ ] Measure information plane: I(X;Z) vs I(Z;Y) for genuine compression analysis
+- [ ] Test with real agent traces, not synthetic vocabularies
 
-**Medium-term** (prove production viability):
+**Medium-term (if fundamentals prove out):**
+- [ ] LLM embedding-space injection (bypass text roundtrip)
+- [ ] Dec-POMDP setup with partial observability
 - [ ] Multi-agent broadcast — one Observer, N Navigators
-- [ ] Moving obstacles — force reactive Neuralese
-- [ ] Integration with real agent frameworks (LangChain/Hermes plugin)
 
-**Long-term** (generalize to real-world agents):
-- [ ] Multi-modal unified latent space (text + structured data + vision)
+**Long-term:**
 - [ ] Self-supervised Neuralese pre-training on large-scale agent traces
 - [ ] MARL-trained emergent protocol with zero human-designed reward
 
 ## Development Methodology
 
-This project was co-developed with **Gemini Pro** as a collaborative peer reviewer
-across 17 rounds of multi-turn sessions. The pattern:
-
-1. Build prototype → upload source to Gemini Pro
-2. Gemini reviews architecture, finds structural flaws
-3. Implement ALL fixes → re-review
-4. Repeat until convergence
-
-Key insight from this process: **MLP architecture forces emergence by preventing
-memorization**. Architectures with memory (CNN, GRU) encode the full plan at t=0
-and produce static communication. The architecture's limitation IS the feature.
-
-## Citation
-
-If you use Neuralese in your research:
-
-```
-@misc{neuralese2026,
-  title={Neuralese: Emergent Latent-Space Communication for AI Agents},
-  author={Hermes Agent \& Gemini Pro},
-  year={2026},
-  note={Proven 1,200× bandwidth improvement over tokenized inter-agent communication}
-}
-```
+This project was co-developed with **Gemini Pro** as a collaborative peer reviewer.
+The key insight from this process: **MLP architecture forces the latent space to
+carry per-step information by preventing memorization across timesteps.**
+Architectures with memory (CNN, GRU) encode the full plan at t=0.
 
 ## License
 

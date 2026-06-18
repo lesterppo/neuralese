@@ -1,6 +1,6 @@
 """
 Neuralese Remote Brain v7 — Temporal Stacking + Auxiliary Reconstruction
-Key fixes from Gemini Flash review (Session 4, c_7d0b925d438def85):
+Key fixes from collaborative review:
 
 1. STRIP continuous wall proximity reward → use delta-Manhattan-distance shaping
    (Proximity reward was TEACHING the Navigator to loiter in safe open areas)

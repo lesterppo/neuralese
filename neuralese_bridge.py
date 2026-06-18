@@ -242,15 +242,14 @@ ERROR_TYPES = StructuredContext.ERROR_TYPES[:MAX_ERROR_TYPES]
 FN_NAMES = StructuredContext.FUNCTION_NAMES[:MAX_FUNCTION_NAMES]
 
 SAMPLE_PATHS = [
-    "/home/peter/neuralese/maze_navigator_v7.py",
-    "/home/peter/neuralese/maze_navigator_v6.py",
-    "/home/peter/hermes-agent/tools/delegate_tool.py",
-    "/home/peter/hermes-agent/run_agent.py",
-    "/home/peter/hermes-agent/model_tools.py",
-    "/home/peter/neuralese/demo.py",
-    "/home/peter/ply-tensor-language/ply/interpreter.py",
-    "/home/peter/deepworld/src/world.py",
-    "/home/peter/stock-world-model/dual_momentum.py",
+    "/workspace/neuralese/maze_navigator.py",
+    "/workspace/neuralese/demo.py",
+    "/workspace/project/tools/delegate_tool.py",
+    "/workspace/project/run_agent.py",
+    "/workspace/project/model_tools.py",
+    "/workspace/project/src/utils.py",
+    "/workspace/project/src/world.py",
+    "/workspace/project/dual_momentum.py",
 ]
 
 SAMPLE_SYMBOLS = [
@@ -356,13 +355,13 @@ def evaluate_roundtrip(encoder, decoder, num_samples=100):
 
 def demo_compression(encoder, decoder):
     ctx = StructuredContext(
-        file_path="/home/peter/neuralese/maze_navigator_v7.py",
+        file_path="/workspace/neuralese/maze_navigator.py",
         line_number=415,
         error_type="type_error",
         function_name="evaluate",
         attempted_fixes=["added .squeeze(0) at line 414", "checked tensor dimensions"],
         related_symbols=["navigator", "observer", "forward"],
-        workspace_path="/home/peter/neuralese",
+        workspace_path="/workspace/neuralese",
     )
     x = encoder.embed_context([ctx])
     with torch.no_grad():

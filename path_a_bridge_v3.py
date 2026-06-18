@@ -1,7 +1,7 @@
 """
 Neuralese Path A Bridge v3 — Hermes Subagent Context Compression
 Uses Path B's proven architecture: learnable embeddings + supervised training.
-Gemini Session 5 Round 2: weighted loss for categorical fields, not larger bottleneck.
+Gemini collaborative review: weighted loss for categorical fields, not larger bottleneck.
 """
 import torch
 import torch.nn as nn
@@ -75,9 +75,9 @@ FILES = [f"src/module_{i}.py" for i in range(20)] + [
     f"tools/{t}.py" for t in ["delegate","terminal","file","search"]] + [
     f"agent/{a}.py" for a in ["memory","cache","compression","display","curator"]]
 
-WORKSPACES = ["/home/peter/neuralese","/home/peter/hermes-agent","/home/peter/deepworld",
-              "/home/peter/ply-tensor-language","/home/peter/stock-world-model",
-              "/home/peter/doctor-roster","/home/peter/research","/home/peter/gemini-cli"]
+WORKSPACES = ["/workspace/neuralese","/workspace/project","/workspace/deepworld",
+              "/workspace/ply-tensor","/workspace/stock-model",
+              "/workspace/doctor-roster","/workspace/research","/workspace/gemini-cli"]
 
 FIXES = [f"added {op} to fix {what}" for op in
     [".squeeze(0)",".unsqueeze(0)",".detach()",".clamp()","torch.no_grad()",

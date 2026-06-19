@@ -75,9 +75,9 @@ FILES = [f"src/module_{i}.py" for i in range(20)] + [
     f"tools/{t}.py" for t in ["delegate","terminal","file","search"]] + [
     f"agent/{a}.py" for a in ["memory","cache","compression","display","curator"]]
 
-WORKSPACES = ["/home/peter/neuralese","/home/peter/hermes-agent","/home/peter/deepworld",
-              "/home/peter/ply-tensor-language","/home/peter/stock-world-model",
-              "/home/peter/doctor-roster","/home/peter/research","/home/peter/gemini-cli"]
+WORKSPACES = ["/workspace/neuralese","/workspace/hermes-agent","/workspace/deepworld",
+              "/workspace/ply-tensor-language","/workspace/stock-world-model",
+              "/workspace/doctor-roster","/workspace/research","/workspace/gemini-cli"]
 
 FIXES = [f"added {op} to fix {what}" for op in
     [".squeeze(0)",".unsqueeze(0)",".detach()",".clamp()","torch.no_grad()",

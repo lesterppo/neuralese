@@ -1,15 +1,15 @@
 """
+[DEPRECATED — see referential_game.py and xarch.py for current cross-model tests]
+
 Neuralese Cross-Model Integration Test
 Tests whether compressed Neuralese context preserves enough information
 for an LLM to take the same action as with full text context.
 
-Setup:
-  1. DeepSeek API (planner) → generates a structured code-editing task
-  2. PyTorch Observer → encodes task into 12D Neuralese
-  3. DeepSeek API (executor) → receives decoded context, takes action
-  4. Compare: text-only vs Neuralese accuracy
-
-Token efficiency measurement included.
+LEGACY NOTE (June 2026): This measures autoencoder roundtrip accuracy —
+it encodes a task into Neuralese, DECODES BACK TO TEXT, then feeds the
+decoded text to an LLM. This tests autoencoder fidelity, NOT whether the
+LLM understands raw latent vectors. The claimed "cross-model communication"
+was a text roundtrip, not genuine latent communication.
 """
 import torch
 import torch.nn as nn
@@ -119,12 +119,9 @@ def decode_task(z_vector):
 
 
 # --- DeepSeek API helper ---
-def get_api_key():
-    r = subprocess.run(["bash", "-i", "-c", "echo $DEEPSEEK_API_KEY"],
-                       capture_output=True, text=True, timeout=5)
-    return r.stdout.strip().split("\n")[-1]
-
-API_KEY = get_api_key()
+# NOTE: Requires DEEPSEEK_API_KEY environment variable.
+# Never commit API keys. Set via: export DEEPSEEK_API_KEY=...
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 def call_deepseek(prompt, max_tokens=200):
     """Call DeepSeek API."""

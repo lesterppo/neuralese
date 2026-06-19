@@ -37,7 +37,9 @@ communication between independent agents yet.**
 | **Referential game (v2)** | ✅ **PROVEN** | **88.2% accuracy (chance=25%), null=21% — emergent communication** |
 | Bandwidth proof (coordinate reconstruction) | ✅ Complete | Continuous beats discrete at equal bit budgets |
 | Path C state sync (fixed) | ✅ Complete | 499% MI Gain with independent agents |
-| Path B stress test (open vocab) | ✅ Complete | 0.73 cosine — real compression, not lookup |
+| Task routing (16D) | ✅ Complete | **97.8% accuracy from 16D vector — deployable** |
+| Context compression (16D) | ✅ Complete | **55.6% exact match, 2.8× token savings — viable** |
+| Cross-architecture test | ✅ Complete | **6/6 pairs work (CNN, LSTM, Attention)** |
 | Maze (MLP + PPO, no warm-start) | 🔬 Active | ~18% success, unstable |
 | **v12: Independent agents + GRU + info plane** | ❌ **Falsified** | Neuralese 15.5% vs Null 14.0% — channel unused |
 | Null-channel test (random z) | ⚠ Audit | 10% success vs 18% Neuralese — channel carries only +8% |

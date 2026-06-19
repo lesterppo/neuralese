@@ -149,10 +149,13 @@ if __name__ == "__main__":
         loss = nn.CrossEntropyLoss()(logits, targets)
         ropt.zero_grad(); loss.backward(); ropt.step(); rsch.step()
 
-    # Router eval
-    tz = s(torch.stack([text_emb(t["full_text"]) for t in bt]))
-    tpreds = router(tz).argmax(-1)
-    rfa = (tpreds == tt).float().mean().item()
+    # Router eval — use test_tasks, not bt (which was overwritten)
+    test_embs = torch.stack([text_emb(t["full_text"]) for t in test_tasks])
+    test_tt = torch.tensor([TASK_TYPES.index(t["task_type"]) for t in test_tasks])
+    with torch.no_grad():
+        tz = s(test_embs)
+        tpreds = router(tz).argmax(-1)
+    rfa = (tpreds == test_tt).float().mean().item()
     print(f"  Routing accuracy: {rfa:.1%} (chance={1/N_TASKS:.1%})")
 
     # Summary
